@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hextris</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0d1117;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  color: #fff;
+  user-select: none;
+  -webkit-user-select: none;
+}
+h1 {
+  font-size: 2.4rem;
+  font-weight: 900;
+  letter-spacing: 10px;
+  background: linear-gradient(135deg, #2ecc71, #3498db);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 8px;
+}
+#hud {
+  display: flex;
+  gap: 48px;
+  margin-bottom: 16px;
+  font-size: 0.85rem;
+  letter-spacing: 2px;
+  color: #556;
+}
+#hud .val { display: block; color: #fff; font-weight: bold; font-size: 1.4rem; text-align: center; }
+.wrap { position: relative; }
+canvas { display: block; }
+#overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10,14,20,0.88);
+  border-radius: 8px;
+}
+#overlay h2 {
+  font-size: 2.8rem;
+  letter-spacing: 6px;
+  margin-bottom: 10px;
+  background: linear-gradient(135deg, #e74c3c, #c0392b);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+#overlay h2.title-green {
+  background: linear-gradient(135deg, #2ecc71, #3498db);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+#overlay .sub { color: #778; font-size: 0.95rem; margin-bottom: 20px; text-align: center; line-height: 1.6; }
+#overlay .final { font-size: 1.3rem; font-weight: bold; color: #fff; margin-bottom: 22px; display: none; }
+#playBtn {
+  background: linear-gradient(135deg, #2ecc71, #27ae60);
+  color: #000;
+  border: none;
+  padding: 14px 44px;
+  font-size: 1rem;
+  font-weight: bold;
+  border-radius: 8px;
+  cursor: pointer;
+  letter-spacing: 3px;
+  transition: transform 0.1s;
+}
+#playBtn:hover { transform: scale(1.05); }
+#keys {
+  margin-top: 14px;
+  font-size: 0.75rem;
+  color: #334;
+  text-align: center;
+  line-height: 1.9;
+}
+</style>
+</head>
+<body>
+<h1>HEXTRIS</h1>
+<div id="hud">
+  <div>SCORE<span class="val" id="scoreVal">0</span></div>
+  <div>LEVEL<span class="val" id="levelVal">1</span></div>
+  <div>BEST<span class="val" id="bestVal">0</span></div>
+</div>
+<div class="wrap">
+  <canvas id="c" width="520" height="520"></canvas>
+  <div id="overlay">
+    <h2 id="oTitle" class="title-green">HEXTRIS</h2>
+    <div class="sub" id="oSub">
+      Blocks fall from all six sides.<br>
+      Rotate the hexagon to stack matching colors.<br>
+      3 in a row clears them!
+    </div>
+    <div class="final" id="oFinal">Score: <span id="oFinalVal">0</span></div>
+    <button id="playBtn">PLAY</button>
+  </div>
+</div>
+<div id="keys">
+  ← → &nbsp;or&nbsp; A D &nbsp;— rotate &nbsp;&nbsp;|&nbsp;&nbsp; Space — pause<br>
+  Tap left/right half of board on mobile
+</div>
+
+<script>
+'use strict';
+// ─────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────
+const W = 520, H = 520, CX = W / 2, CY = H / 2;
+const NS = 6;            // number of sides
+const HEX_CR = 50;       // circumradius (center → vertex)
+const HEX_IR = HEX_CR * Math.cos(Math.PI / NS);  // inradius (center → side midpoint)
+const BH = 22;           // block height (radial thickness)
+const MAX_STACK = 10;    // game over when a stack reaches this
+const MATCH = 3;         // min consecutive same-color to clear
+const ROT_SPD = 380;     // deg/sec rotation animation speed
+
+const COLORS = ['#e74c3c','#3498db','#2ecc71','#f1c40f','#9b59b6','#e67e22'];
+const DARKS  = ['#c0392b','#1a5276','#1e8449','#9a7d0a','#6c3483','#935116'];
+
+// ─────────────────────────────────────────────────────────────
+// DOM
+// ─────────────────────────────────────────────────────────────
+const canvas   = document.getElementById('c');
+const ctx      = canvas.getContext('2d');
+const overlay  = document.getElementById('overlay');
+const scoreEl  = document.getElementById('scoreVal');
+const levelEl  = document.getElementById('levelVal');
+const bestEl   = document.getElementById('bestVal');
+const oTitle   = document.getElementById('oTitle');
+const oSub     = document.getElementById('oSub');
+const oFinal   = document.getElementById('oFinal');
+const oFinalV  = document.getElementById('oFinalVal');
+
+// ─────────────────────────────────────────────────────────────
+// Game state
+// ─────────────────────────────────────────────────────────────
+let gameState;  // 'menu' | 'playing' | 'paused' | 'over'
+let stacks, hexRot, targetRot, falling;
+let score, level, best;
+let spawnTimer, spawnInterval, fallSpeed;
+let lastTs, particles;
+
+function initGame() {
+  stacks       = Array.from({ length: NS }, () => []);
+  hexRot       = 0;
+  targetRot    = 0;
+  falling      = [];
+  score        = 0;
+  level        = 1;
+  spawnTimer   = 0;
+  spawnInterval = 1.7;
+  fallSpeed    = 105;
+  lastTs       = null;
+  particles    = [];
+  updateHUD();
+}
+
+function updateHUD() {
+  scoreEl.textContent = score;
+  levelEl.textContent = level;
+  bestEl.textContent  = best || 0;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Overlay helpers
+// ─────────────────────────────────────────────────────────────
+function showMenu() {
+  oTitle.textContent = 'HEXTRIS';
+  oTitle.className = 'title-green';
+  oSub.innerHTML = 'Blocks fall from all six sides.<br>Rotate the hexagon to stack matching colors.<br>3 in a row clears them!';
+  oFinal.style.display = 'none';
+  overlay.style.display = 'flex';
+}
+
+function showPaused() {
+  oTitle.textContent = 'PAUSED';
+  oTitle.className = 'title-green';
+  oSub.innerHTML = 'Press <strong>Space</strong> or tap to resume.';
+  oFinal.style.display = 'none';
+  overlay.style.display = 'flex';
+}
+
+function showGameOver() {
+  oTitle.textContent = 'GAME OVER';
+  oTitle.className = '';
+  oSub.innerHTML = 'The hex is full. Try again!';
+  oFinalV.textContent = score;
+  oFinal.style.display = 'block';
+  overlay.style.display = 'flex';
+}
+
+function hideOverlay() {
+  overlay.style.display = 'none';
+}
+
+// ─────────────────────────────────────────────────────────────
+// Geometry helpers
+// ─────────────────────────────────────────────────────────────
+// Returns [v0, v1, ..., v5] for hexagon at current hexRot
+function hexVerts() {
+  const v = [];
+  for (let i = 0; i < NS; i++) {
+    const a = (hexRot + i * 60) * Math.PI / 180;
+    v.push([CX + HEX_CR * Math.cos(a), CY + HEX_CR * Math.sin(a)]);
+  }
+  return v;
+}
+
+// World-space vertices for side w (at hexRot=0, always fixed)
+function worldSideVerts(w) {
+  const a0 = w * 60 * Math.PI / 180;
+  const a1 = (w + 1) * 60 * Math.PI / 180;
+  return [
+    [CX + HEX_CR * Math.cos(a0), CY + HEX_CR * Math.sin(a0)],
+    [CX + HEX_CR * Math.cos(a1), CY + HEX_CR * Math.sin(a1)],
+  ];
+}
+
+// Outward normal for two vertices [vA, vB] (CW polygon in canvas → right normal)
+function outNormal(vA, vB) {
+  const dx = vB[0] - vA[0], dy = vB[1] - vA[1];
+  const len = Math.hypot(dx, dy);
+  return [dy / len, -dx / len];
+}
+
+// Which physical stack index does worldSide w land on?
+// Uses targetRot (not hexRot) so gameplay is deterministic even mid-animation.
+function worldToStack(w) {
+  const r = Math.round(targetRot / 60);
+  return ((w - r) % NS + NS) % NS;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Spawn & land
+// ─────────────────────────────────────────────────────────────
+function spawnBlock(forceSide) {
+  const worldSide = forceSide !== undefined ? forceSide : Math.floor(Math.random() * NS);
+  const color = Math.floor(Math.random() * COLORS.length);
+  falling.push({
+    worldSide,
+    color,
+    dist: HEX_IR + (MAX_STACK + 3) * BH,  // start far outside
+  });
+}
+
+function landBlock(b) {
+  const s = worldToStack(b.worldSide);
+  stacks[s].push(b.color);
+  doMatches(s);
+  if (stacks[s].length >= MAX_STACK) {
+    endGame();
+  }
+}
+
+function doMatches(s) {
+  const st = stacks[s];
+  let anyCleared = false;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    let i = 0;
+    while (i < st.length) {
+      let j = i + 1;
+      while (j < st.length && st[j] === st[i]) j++;
+      if (j - i >= MATCH) {
+        const run = j - i;
+        const pts = run * 100 * level;
+        score += pts;
+        // Emit particles at match location
+        emitParticles(s, i, run, st[i]);
+        st.splice(i, run);
+        changed = true;
+        anyCleared = true;
+        break;
+      }
+      i = j;
+    }
+  }
+  if (anyCleared) {
+    level = 1 + Math.floor(score / 900);
+    spawnInterval = Math.max(0.32, 1.7 - (level - 1) * 0.085);
+    fallSpeed = Math.min(320, 105 + (level - 1) * 22);
+    updateHUD();
+  }
+}
+
+function endGame() {
+  gameState = 'over';
+  if (score > (best || 0)) {
+    best = score;
+    bestEl.textContent = best;
+  }
+  showGameOver();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Particles
+// ─────────────────────────────────────────────────────────────
+function emitParticles(side, depthStart, count, colorIdx) {
+  const verts = hexVerts();
+  const vA = verts[side], vB = verts[(side + 1) % NS];
+  const [nx, ny] = outNormal(vA, vB);
+  // Midpoint of the cleared run
+  const d = (depthStart + count / 2) * BH;
+  const mx = (vA[0] + vB[0]) / 2 + nx * d;
+  const my = (vA[1] + vB[1]) / 2 + ny * d;
+
+  for (let i = 0; i < 14; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 60 + Math.random() * 120;
+    particles.push({
+      x: mx, y: my,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1.0,
+      decay: 1.2 + Math.random() * 0.8,
+      r: 2 + Math.random() * 3,
+      color: COLORS[colorIdx],
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 0.92;
+    p.vy *= 0.92;
+    p.life -= p.decay * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Input
+// ─────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (gameState === 'playing') {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
+      targetRot -= 60;
+      e.preventDefault();
+    } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+      targetRot += 60;
+      e.preventDefault();
+    } else if (e.key === ' ') {
+      gameState = 'paused';
+      showPaused();
+      e.preventDefault();
+    }
+  } else if (gameState === 'paused') {
+    if (e.key === ' ') {
+      gameState = 'playing';
+      hideOverlay();
+      lastTs = null;
+      e.preventDefault();
+    }
+  }
+});
+
+document.getElementById('playBtn').addEventListener('click', () => {
+  initGame();
+  hideOverlay();
+  gameState = 'playing';
+  lastTs = null;
+});
+
+// Touch: tap left half → rotate left, right half → rotate right
+let touchX0 = 0;
+canvas.addEventListener('touchstart', e => {
+  touchX0 = e.touches[0].clientX;
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  if (gameState === 'paused') {
+    gameState = 'playing';
+    hideOverlay();
+    lastTs = null;
+    e.preventDefault();
+    return;
+  }
+  if (gameState !== 'playing') { e.preventDefault(); return; }
+  const dx = e.changedTouches[0].clientX - touchX0;
+  if (Math.abs(dx) < 10) {
+    // Tap: left half = left, right half = right
+    const rect = canvas.getBoundingClientRect();
+    const tx = e.changedTouches[0].clientX - rect.left;
+    targetRot += tx < rect.width / 2 ? -60 : 60;
+  } else {
+    targetRot += dx > 0 ? 60 : -60;
+  }
+  e.preventDefault();
+}, { passive: false });
+
+// ─────────────────────────────────────────────────────────────
+// Game loop
+// ─────────────────────────────────────────────────────────────
+function gameLoop(ts) {
+  requestAnimationFrame(gameLoop);
+  const dt = lastTs ? Math.min((ts - lastTs) / 1000, 0.1) : 0;
+  lastTs = ts;
+
+  if (gameState === 'playing') update(dt);
+  render();
+}
+
+function update(dt) {
+  // Animate hex rotation toward targetRot
+  const diff = targetRot - hexRot;
+  if (Math.abs(diff) > 0.01) {
+    const step = Math.sign(diff) * ROT_SPD * dt;
+    hexRot = Math.abs(step) >= Math.abs(diff) ? targetRot : hexRot + step;
+  } else {
+    hexRot = targetRot;
+  }
+
+  // Spawn
+  spawnTimer += dt;
+  if (spawnTimer >= spawnInterval) {
+    spawnTimer -= spawnInterval;
+    spawnBlock();
+    if (level >= 4 && Math.random() < 0.4) spawnBlock();
+  }
+
+  // Move falling blocks inward
+  const toLand = [];
+  for (const b of falling) {
+    b.dist -= fallSpeed * dt;
+    const stackIdx = worldToStack(b.worldSide);
+    const landDist = HEX_IR + stacks[stackIdx].length * BH;
+    if (b.dist <= landDist) toLand.push(b);
+  }
+  for (const b of toLand) {
+    falling.splice(falling.indexOf(b), 1);
+    landBlock(b);
+    if (gameState !== 'playing') return;
+  }
+
+  updateParticles(dt);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Rendering
+// ─────────────────────────────────────────────────────────────
+function render() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  const bg = ctx.createRadialGradient(CX, CY, 20, CX, CY, 310);
+  bg.addColorStop(0, '#1b2640');
+  bg.addColorStop(1, '#0d1117');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  const verts = hexVerts();
+
+  // Faint guide rays from center
+  for (let i = 0; i < NS; i++) {
+    ctx.beginPath();
+    ctx.moveTo(CX, CY);
+    ctx.lineTo(CX + (verts[i][0] - CX) * 6, CY + (verts[i][1] - CY) * 6);
+    ctx.strokeStyle = 'rgba(255,255,255,0.035)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Draw stacked blocks (attached to rotating hexagon)
+  for (let s = 0; s < NS; s++) {
+    for (let d = 0; d < stacks[s].length; d++) {
+      drawBlock(verts[s], verts[(s + 1) % NS], d, stacks[s][d]);
+    }
+  }
+
+  // Draw falling blocks (fixed world space)
+  for (const b of falling) {
+    const [wv0, wv1] = worldSideVerts(b.worldSide);
+    drawBlock(wv0, wv1, null, b.color, b.dist - HEX_IR);
+  }
+
+  // Draw central hexagon on top
+  drawCenter(verts);
+
+  // Particles
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Draws a block on a side defined by vA→vB.
+// If depthIndex is a number, it's a stacked block at depth `depthIndex`.
+// If depthIndex is null, use `dFromSurface` as the raw offset from HEX_IR.
+function drawBlock(vA, vB, depthIndex, colorIdx, dFromSurface) {
+  const [nx, ny] = outNormal(vA, vB);
+  const d0 = depthIndex !== null ? depthIndex * BH : dFromSurface;
+  const d1 = d0 + BH;
+
+  const p0 = [vA[0] + nx * d0, vA[1] + ny * d0];
+  const p1 = [vB[0] + nx * d0, vB[1] + ny * d0];
+  const p2 = [vB[0] + nx * d1, vB[1] + ny * d1];
+  const p3 = [vA[0] + nx * d1, vA[1] + ny * d1];
+
+  ctx.beginPath();
+  ctx.moveTo(p0[0], p0[1]);
+  ctx.lineTo(p1[0], p1[1]);
+  ctx.lineTo(p2[0], p2[1]);
+  ctx.lineTo(p3[0], p3[1]);
+  ctx.closePath();
+  ctx.fillStyle = COLORS[colorIdx];
+  ctx.fill();
+  ctx.strokeStyle = DARKS[colorIdx];
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Inner edge highlight
+  ctx.beginPath();
+  ctx.moveTo(p0[0], p0[1]);
+  ctx.lineTo(p1[0], p1[1]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Outer edge shadow
+  ctx.beginPath();
+  ctx.moveTo(p2[0], p2[1]);
+  ctx.lineTo(p3[0], p3[1]);
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function drawCenter(verts) {
+  // Filled central hexagon
+  ctx.beginPath();
+  ctx.moveTo(verts[0][0], verts[0][1]);
+  for (let i = 1; i < NS; i++) ctx.lineTo(verts[i][0], verts[i][1]);
+  ctx.closePath();
+
+  const grad = ctx.createRadialGradient(CX, CY, 0, CX, CY, HEX_CR);
+  grad.addColorStop(0, '#2a3d5c');
+  grad.addColorStop(1, '#1a2740');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Outer ring
+  ctx.strokeStyle = '#4a7fa8';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Inner decorative hex (60% scale)
+  ctx.beginPath();
+  for (let i = 0; i < NS; i++) {
+    const x = CX + (verts[i][0] - CX) * 0.52;
+    const y = CY + (verts[i][1] - CY) * 0.52;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.strokeStyle = 'rgba(74,127,168,0.35)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Center dot
+  ctx.beginPath();
+  ctx.arc(CX, CY, 3, 0, Math.PI * 2);
+  ctx.fillStyle = '#4a7fa8';
+  ctx.fill();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Boot
+// ─────────────────────────────────────────────────────────────
+best = 0;
+gameState = 'menu';
+initGame();
+showMenu();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
